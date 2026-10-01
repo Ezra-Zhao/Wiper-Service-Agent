@@ -39,6 +39,12 @@ class WiperSizes:
                 "passenger_in": self.passenger_in,
                 "rear_in": self.rear_in}
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "WiperSizes":
+        return cls(driver_in=int(d["driver_in"]),
+                   passenger_in=int(d["passenger_in"]),
+                   rear_in=d.get("rear_in"))
+
 
 @dataclass
 class Quote:
@@ -58,6 +64,16 @@ class Quote:
                 "discount": self.discount,
                 "total": self.total,
                 "simulated": self.simulated}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Quote":
+        return cls(sizes=WiperSizes.from_dict(d["sizes"]),
+                   driver_price=float(d["driver_price"]),
+                   passenger_price=float(d["passenger_price"]),
+                   rear_price=float(d.get("rear_price", 0.0)),
+                   discount=float(d.get("discount", 0.0)),
+                   total=float(d.get("total", 0.0)),
+                   simulated=bool(d.get("simulated", True)))
 
 
 @dataclass

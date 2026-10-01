@@ -71,7 +71,7 @@ cd Wiper-Service-Agent
 pip install -r requirements.txt
 
 python examples/demo.py        # 4 simulated customer conversations (中文 + Español)
-python -m pytest tests/ -q    # 27 tests
+python tests/run_tests.py     # 44 tests, no pytest needed
 ```
 
 Demo scenarios:
@@ -82,6 +82,29 @@ Demo scenarios:
 
 Each scenario prints the full transcript plus the final order-intent JSON
 (which now includes `detected_language`).
+
+## Production deployment (Render + Meta, live 2026-10-01)
+
+`whatsapp/webhook_server.py` is a stdlib-only webhook: verifies Meta's
+challenge on GET, checks `X-Hub-Signature-256` on POST, runs messages
+through the agent, and replies via the Cloud API.
+
+Environment variables (Render dashboard → Environment):
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `WA_VERIFY_TOKEN` | yes | token you set when subscribing the webhook in Meta |
+| `WA_ACCESS_TOKEN` | yes | system-user token (`whatsapp_business_messaging`) |
+| `WA_PHONE_NUMBER_ID` | yes | phone number ID of the business line |
+| `WA_APP_SECRET` | strongly recommended | Meta App secret; enables `X-Hub-Signature-256` verification. Without it the server logs a loud warning and accepts unsigned POSTs |
+| `WA_STORE_PATH` | no (default `./conversations.json`) | conversation persistence file. **Ephemeral on Render free tier** — a restart/sleep loses it; move to Postgres/Redis (same `ConversationStore` interface) when the business outgrows free |
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | no | OpenAI-compatible endpoint for `RealLLMProvider`. Unset → deterministic `MockLLM` is used |
+| `WA_API_VERSION` | no (default `v21.0`) | Graph API version |
+| `PORT` | no (default `8000`) | listen port |
+
+`RealLLMProvider` only *parses* messages into `ParsedMessage`
+(intent/make/model/year/faq_topic) — it never decides prices, sizes, or
+deals. Any network/API/JSON failure falls back to `MockLLM` automatically.
 
 ## Multilingual v1 (2026-10-01)
 
@@ -110,24 +133,25 @@ Persian, so the bot handles language itself:
   (short words like "да"/"sí" matched on word boundaries to avoid
   inside-word false hits).
 
-## WhatsApp wiring (TODO)
+## WhatsApp wiring
 
 `whatsapp/adapter.py` is the transport boundary: `(phone, text) -> reply text`.
-Production wiring is marked TODO in the file:
-
-- **Baileys** (Node.js): `messages.upsert` → `on_incoming(sender, text)` → `sock.sendMessage`
-- **whatsapp-web.js**: `client.on('message')` → `msg.reply(...)`
+`whatsapp/webhook_server.py` is the production wiring (Meta Cloud API webhook,
+deployed on Render — see "Production deployment" above). The Baileys /
+whatsapp-web.js hooks remain as documented alternatives in `adapter.py`.
 
 ## Roadmap
 
 - [x] Language detection per customer (zh/en/es/ru/fa/ar, rule-based v1)
+- [x] `RealLLMProvider` (OpenAI-compatible NLU, safe fallback to MockLLM;
+      parse-only, never decides prices/sizes/deals)
+- [x] Conversation persistence (`ConversationStore` interface + JSON file
+      backend; swap in Postgres/Redis later without agent changes)
+- [x] `X-Hub-Signature-256` webhook verification (`WA_APP_SECRET`)
 - [ ] Real vehicle fitment database (replace `tools/wiper_db.py` SIMULATED catalog)
 - [ ] Real price list (CSV import in `tools/pricing.py`)
-- [ ] `RealLLMProvider` with function calling (drop-in for `MockLLM`;
-      generates replies in the customer's detected language)
 - [ ] Native-speaker review of es/ru/fa templates; full ar template pack
-- [ ] Baileys / whatsapp-web.js production hookup
-- [ ] Order persistence (SQLite/Postgres) + human handoff for edge cases
+- [ ] Human handoff for edge cases
 
 ## License
 

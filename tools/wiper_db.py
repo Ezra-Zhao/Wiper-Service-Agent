@@ -21,6 +21,21 @@ class WiperFitment:
     rear_in: int | None = None
     simulated: bool = True
 
+    def to_dict(self) -> dict:
+        return {"make": self.make, "model": self.model,
+                "year_start": self.year_start, "year_end": self.year_end,
+                "driver_in": self.driver_in, "passenger_in": self.passenger_in,
+                "rear_in": self.rear_in, "simulated": self.simulated}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "WiperFitment":
+        return cls(make=d["make"], model=d["model"],
+                   year_start=int(d["year_start"]), year_end=int(d["year_end"]),
+                   driver_in=int(d["driver_in"]),
+                   passenger_in=int(d["passenger_in"]),
+                   rear_in=d.get("rear_in"),
+                   simulated=bool(d.get("simulated", True)))
+
 
 SIMULATED_FITMENTS = [
     WiperFitment("toyota", "camry", 2018, 2024, 26, 20),

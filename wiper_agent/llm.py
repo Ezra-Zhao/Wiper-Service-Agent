@@ -1,12 +1,18 @@
 """NLU layer. Default is a deterministic rule-based mock (SIMULATED).
 
-TODO(ezra): implement RealLLMProvider using function-calling (OpenAI /
-Anthropic / local model) with the same ParsedMessage contract, then swap it
-in WiperServiceAgent(llm=RealLLMProvider(...)).
+RealLLMProvider below talks to any OpenAI-compatible chat-completions
+endpoint and returns the same ParsedMessage contract. The model is only
+ever asked to *parse* the message — it never decides prices, sizes, or
+whether a deal is closed; those stay in the deterministic tools.
+Configure via env: LLM_BASE_URL, LLM_API_KEY, LLM_MODEL.
+With none of them set, RealLLMProvider silently delegates to MockLLM.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
+import urllib.request
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -136,3 +142,98 @@ class MockLLM:
 
         return ParsedMessage(intent=intent, make=make, model=model,
                              year=year, faq_topic=faq_topic, simulated=True)
+
+
+_INTENT_NAMES = {i.name for i in Intent}
+_FAQ_TOPICS = set(FAQ_KW)
+
+_NLU_SYSTEM = (
+    "You are a multilingual NLU parser for a wiper-blade shop assistant. "
+    "Reply with ONLY a JSON object, no other text, with exactly these fields: "
+    '{"intent": one of GREETING|PROVIDE_VEHICLE|ASK_PRICE|HAGGLE|FAQ|CONFIRM|DECLINE|UNKNOWN, '
+    '"make": car brand in lowercase or "", '
+    '"model": car model in lowercase or "", '
+    '"year": 4-digit year or 0, '
+    '"faq_topic": one of install|warranty|lifespan|payment|pickup|shipping or ""}. '
+    "Rules: GREETING only when the message is just a greeting with no vehicle info. "
+    "FAQ when asking about installation/warranty/lifespan/payment/pickup/shipping. "
+    "Never mention prices, sizes, or discounts — parse only."
+)
+
+
+class RealLLMProvider:
+    """OpenAI-compatible NLU with safe fallback to MockLLM.
+
+    Any network, API, or JSON failure falls back to the deterministic mock
+    so the bot keeps answering. The model output is validated and coerced
+    into the ParsedMessage contract before use.
+    """
+
+    def __init__(self, base_url: str = "", api_key: str = "",
+                 model: str = "", timeout: int = 15):
+        self.base_url = (base_url or os.environ.get("LLM_BASE_URL", "")).rstrip("/")
+        self.api_key = api_key or os.environ.get("LLM_API_KEY", "")
+        self.model = model or os.environ.get("LLM_MODEL", "")
+        self.timeout = timeout
+        self.fallback = MockLLM()
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.api_key and self.model)
+
+    def parse(self, text: str, catalog: list[tuple[str, str]]) -> ParsedMessage:
+        if not self.configured:
+            return self.fallback.parse(text, catalog)
+        try:
+            return self._parse_remote(text, catalog)
+        except Exception as exc:  # network/API/JSON: stay alive on mock
+            print(f"[llm] remote NLU failed ({exc}); using MockLLM", flush=True)
+            return self.fallback.parse(text, catalog)
+
+    def _parse_remote(self, text: str,
+                      catalog: list[tuple[str, str]]) -> ParsedMessage:
+        brands = sorted({mk for mk, _ in catalog})
+        body = json.dumps({
+            "model": self.model,
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": _NLU_SYSTEM},
+                {"role": "user",
+                 "content": f"Known brands: {', '.join(brands)}\nMessage: {text}"},
+            ],
+        }).encode()
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=body,
+            headers={"Authorization": f"Bearer {self.api_key}",
+                     "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            payload = json.loads(resp.read().decode())
+        content = payload["choices"][0]["message"]["content"]
+        d = json.loads(content)
+        return self._coerce(d)
+
+    @staticmethod
+    def _coerce(d: dict) -> ParsedMessage:
+        name = str(d.get("intent", "UNKNOWN")).upper()
+        intent = Intent[name] if name in _INTENT_NAMES else Intent.UNKNOWN
+        try:
+            year = int(d.get("year", 0))
+        except (TypeError, ValueError):
+            year = 0
+        if not 1900 <= year <= 2100:
+            year = 0
+        topic = str(d.get("faq_topic", "")).lower()
+        if topic not in _FAQ_TOPICS:
+            topic = ""
+        return ParsedMessage(
+            intent=intent,
+            make=str(d.get("make", "")).strip().lower(),
+            model=str(d.get("model", "")).strip().lower(),
+            year=year,
+            faq_topic=topic,
+            simulated=False,
+        )

@@ -20,22 +20,43 @@ from wiper_agent.conversation import Conversation
 from wiper_agent.language import detect_language
 from wiper_agent.llm import Intent, MockLLM
 from wiper_agent.schemas import AgentReply, State, VehicleInfo
+from wiper_agent.store import ConversationStore, MemoryConversationStore
 
 
 class WiperServiceAgent:
-    def __init__(self, llm=None):
+    def __init__(self, llm=None, store: ConversationStore | None = None):
         self.llm = llm or MockLLM()
-        self._convs: dict[str, Conversation] = {}
+        self.store = store or MemoryConversationStore()
+        self._convs: dict[str, Conversation] = {}  # hot cache
 
     # ---------------- public API ----------------
+    def _get_conv(self, phone: str) -> Conversation:
+        conv = self._convs.get(phone)
+        if conv is None:
+            try:
+                conv = self.store.load(phone)
+            except Exception as exc:  # corrupt store must not kill the chat
+                print(f"[store] load failed for {phone}: {exc}", flush=True)
+                conv = None
+            if conv is None:
+                conv = Conversation(phone)
+            self._convs[phone] = conv
+        return conv
+
+    def _put_conv(self, conv: Conversation) -> None:
+        self._convs[conv.phone] = conv
+        try:
+            self.store.save(conv)
+        except Exception as exc:  # never fail the reply because of persistence
+            print(f"[store] save failed for {conv.phone}: {exc}", flush=True)
+
     def handle_message(self, phone: str, text: str) -> AgentReply:
-        conv = self._convs.setdefault(phone, Conversation(phone))
+        conv = self._get_conv(phone)
         conv.history.append(("customer", text))
 
         if conv.state == State.DONE:
             # start a fresh conversation on new input after close
             conv = Conversation(phone)
-            self._convs[phone] = conv
             conv.history.append(("customer", text))
 
         self._detect_language(conv, text)
@@ -45,6 +66,7 @@ class WiperServiceAgent:
         reply = self._step(conv, parsed, lang)
         conv.history.append(("agent", reply))
         intent = conv.build_intent() if conv.state == State.DONE else None
+        self._put_conv(conv)
         return AgentReply(text=reply, state=conv.state, order_intent=intent)
 
     _CONF_RANK = {"low": 0, "medium": 1, "high": 2}

@@ -8,6 +8,16 @@ Environment variables:
     WA_VERIFY_TOKEN      token you set when subscribing the webhook in Meta
     WA_ACCESS_TOKEN      permanent system-user token (whatsapp_business_messaging)
     WA_PHONE_NUMBER_ID   phone number ID of +1 408-459-5225 in BOSOKO
+    WA_APP_SECRET        Meta App secret; enables X-Hub-Signature-256 check.
+                         If unset, signature verification is DISABLED and the
+                         server logs a loud warning on startup.
+    WA_STORE_PATH        JSON file for conversation persistence
+                         (default ./conversations.json; ephemeral on
+                         Render free tier — see wiper_agent/store.py)
+    LLM_BASE_URL         OpenAI-compatible endpoint for RealLLMProvider
+                         (optional; without LLM_* vars the MockLLM is used)
+    LLM_API_KEY          API key for the endpoint above (optional)
+    LLM_MODEL            model name for the endpoint above (optional)
     WA_API_VERSION       Graph API version, default "v21.0"
     PORT                 listen port, default 8000
 
@@ -22,6 +32,8 @@ Then in Meta WhatsApp Manager -> BOSOKO -> Webhook / Configuration:
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -32,22 +44,48 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from whatsapp.adapter import WhatsAppAdapter  # noqa: E402
+from wiper_agent.agent import WiperServiceAgent  # noqa: E402
+from wiper_agent.llm import RealLLMProvider  # noqa: E402
+from wiper_agent.store import FileConversationStore  # noqa: E402
 
 VERIFY_TOKEN = os.environ.get("WA_VERIFY_TOKEN", "")
 ACCESS_TOKEN = os.environ.get("WA_ACCESS_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("WA_PHONE_NUMBER_ID", "")
+APP_SECRET = os.environ.get("WA_APP_SECRET", "")
+STORE_PATH = os.environ.get("WA_STORE_PATH", "./conversations.json")
 API_VERSION = os.environ.get("WA_API_VERSION", "v21.0")
 PORT = int(os.environ.get("PORT", "8000"))
 
 GRAPH_BASE = f"https://graph.facebook.com/{API_VERSION}"
 
-adapter = WhatsAppAdapter()
+# RealLLMProvider falls back to MockLLM when LLM_* env vars are absent,
+# so this is safe to construct unconditionally.
+adapter = WhatsAppAdapter(
+    WiperServiceAgent(
+        llm=RealLLMProvider(),
+        store=FileConversationStore(STORE_PATH),
+    )
+)
 _seen_ids: set[str] = set()
 
 NON_TEXT_FALLBACK = (
     "请用文字发送车型+年份，谢谢。"
     " / Please send your car model + year as text."
 )
+
+
+def verify_signature(raw: bytes, header: str | None) -> bool:
+    """Check Meta's X-Hub-Signature-256 header.
+
+    Returns True when no APP_SECRET is configured (verification disabled).
+    Callers must treat that case as insecure — see the startup warning.
+    """
+    if not APP_SECRET:
+        return True
+    if not header or not header.startswith("sha256="):
+        return False
+    expected = hmac.new(APP_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    return hmac.compare_digest("sha256=" + expected, header)
 
 
 def cloud_send(to: str, text: str) -> None:
@@ -135,8 +173,14 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b""
+        if not verify_signature(raw, self.headers.get("X-Hub-Signature-256")):
+            self.send_response(403)
+            self.end_headers()
+            print("[security] bad/missing X-Hub-Signature-256", flush=True)
+            return
         try:
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = json.loads(raw or b"{}")
         except Exception:
             payload = {}
         try:
@@ -164,6 +208,14 @@ if __name__ == "__main__":
     if missing:
         print(f"missing env: {', '.join(missing)}", file=sys.stderr)
         sys.exit(1)
+    if not APP_SECRET:
+        print(
+            "[warn] WA_APP_SECRET is not set: X-Hub-Signature-256 verification "
+            "is DISABLED. Anyone who knows the webhook URL can POST fake "
+            "messages. Set WA_APP_SECRET to the Meta App secret to enable it.",
+            file=sys.stderr,
+            flush=True,
+        )
     srv = HTTPServer(("0.0.0.0", PORT), Handler)
     print(f"listening on :{PORT}  (POST/GET /webhook)", flush=True)
     srv.serve_forever()
