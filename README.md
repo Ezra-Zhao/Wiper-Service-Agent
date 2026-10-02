@@ -1,5 +1,10 @@
 # Wiper-Service-Agent
 
+**[English](README.md)** | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Português](README.pt.md) | [Русский](README.ru.md)
+
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue) ![License: MIT](https://img.shields.io/badge/license-MIT-green) ![Status: scaffold v0.2](https://img.shields.io/badge/status-scaffold_v0.2-orange)
+
+
 **Conversational AI agent for auto-parts customer service — 雨刷生意客服 Agent**
 
 A multi-turn conversational agent for a real small business: customers send their
